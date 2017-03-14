@@ -144,7 +144,7 @@ func (session *Session) Alias(alias string) *Session {
 
 // NoCascade indicate that no cascade load child object
 func (session *Session) NoCascade() *Session {
-	session.statement.UseCascade = false
+	session.statement.cascadeMode = cascadeManuallyLoad
 	return session
 }
 
@@ -199,9 +199,16 @@ func (session *Session) Charset(charset string) *Session {
 
 // Cascade indicates if loading sub Struct
 func (session *Session) Cascade(trueOrFalse ...bool) *Session {
+	var mode = cascadeAutoLoad
 	if len(trueOrFalse) >= 1 {
-		session.statement.UseCascade = trueOrFalse[0]
+		if trueOrFalse[0] {
+			mode = cascadeAutoLoad
+		} else {
+			mode = cascadeManuallyLoad
+		}
 	}
+
+	session.statement.cascadeMode = mode
 	return session
 }
 
@@ -588,7 +595,7 @@ func (session *Session) slice2Bean(scanResults []interface{}, fields []string, f
 						session.engine.logger.Error("sql.Sanner error:", err.Error())
 						hasAssigned = false
 					}
-				} else if col.SQLType.IsJson() {
+					/*} else if col.SQLType.IsJson() {
 					if rawValueType.Kind() == reflect.String {
 						hasAssigned = true
 						x := reflect.New(fieldType)
@@ -609,18 +616,19 @@ func (session *Session) slice2Bean(scanResults []interface{}, fields []string, f
 							}
 							fieldValue.Set(x.Elem())
 						}
-					}
-				} else if session.statement.UseCascade {
-					table, err := session.engine.autoMapType(*fieldValue)
-					if err != nil {
-						return nil, err
-					}
+					}*/
+				} else if (col.AssociateType == core.AssociateNone &&
+					session.statement.cascadeMode == cascadeCompitable) ||
+					(col.AssociateType == core.AssociateBelongsTo &&
+						session.statement.cascadeMode == cascadeAutoLoad) {
+					table := col.AssociateTable
 
 					hasAssigned = true
 					if len(table.PrimaryKeys) != 1 {
 						return nil, errors.New("unsupported non or composited primary key cascade")
 					}
 					var pk = make(core.PK, len(table.PrimaryKeys))
+					var err error
 					pk[0], err = asKind(vv, rawValueType)
 					if err != nil {
 						return nil, err
