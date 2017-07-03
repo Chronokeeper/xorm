@@ -238,7 +238,17 @@ func (session *Session) noCacheFind(table *core.Table, containerValue reflect.Va
 		if err != nil {
 			return err
 		}
-		return session.rows2Beans(rows, fields, len(fields), tb, newElemFunc, containerValueSetFunc)
+		err = session.rows2Beans(rows, fields, len(fields), tb, newElemFunc, containerValueSetFunc)
+		rows.Close()
+		if err != nil {
+			return err
+		}
+		for _, closure := range session.afterLoadClosures {
+			if err = closure.Func(closure.pk, closure.fieldValue); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 
 	for rows.Next() {

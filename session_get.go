@@ -95,7 +95,27 @@ func (session *Session) nocacheGet(beanKind reflect.Kind, table *core.Table, bea
 		rows.Close()
 
 		dataStruct := rValue(bean)
-		_, err = session.slice2Bean(scanResults, fields, len(fields), bean, &dataStruct, table)
+		_, err = session.slice2Bean(scanResults, fields, len(fields), bean, &dataStruct, session.statement.RefTable)
+		if b, hasAfterSet := bean.(AfterSetProcessor); hasAfterSet {
+			for ii, key := range fields {
+				b.AfterSet(key, Cell(scanResults[ii].(*interface{})))
+			}
+		}
+
+		// handle afterClosures
+		for _, closure := range session.afterClosures {
+			closure(bean)
+		}
+
+		if err != nil {
+			return true, err
+		}
+
+		for _, closure := range session.afterLoadClosures {
+			if err = closure.Func(closure.pk, closure.fieldValue); err != nil {
+				return true, err
+			}
+		}
 	case reflect.Slice:
 		err = rows.ScanSlice(bean)
 	case reflect.Map:
