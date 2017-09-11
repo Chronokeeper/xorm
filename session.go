@@ -21,6 +21,7 @@ type loadClosure struct {
 	Func       func(core.PK, *reflect.Value) error
 	pk         core.PK
 	fieldValue *reflect.Value
+	loaded     bool
 }
 
 // Session keep a pointer to sql.DB and provides all execution of all
@@ -57,6 +58,9 @@ type Session struct {
 	lastSQL     string
 	lastSQLArgs []interface{}
 
+	cascadeMode  cascadeMode
+	cascadeLevel int // load level
+
 	err error
 }
 
@@ -85,6 +89,9 @@ func (session *Session) Init() {
 
 	session.lastSQL = ""
 	session.lastSQLArgs = []interface{}{}
+
+	session.cascadeMode = cascadeCompitable
+	session.cascadeLevel = 2
 }
 
 // Close release the connection from pool
@@ -152,7 +159,7 @@ func (session *Session) Alias(alias string) *Session {
 
 // NoCascade indicate that no cascade load child object
 func (session *Session) NoCascade() *Session {
-	session.statement.cascadeMode = cascadeManually
+	session.cascadeMode = cascadeLazy
 	return session
 }
 
@@ -207,16 +214,16 @@ func (session *Session) Charset(charset string) *Session {
 
 // Cascade indicates if loading sub Struct
 func (session *Session) Cascade(trueOrFalse ...bool) *Session {
-	var mode = cascadeAuto
+	var mode = cascadeEager
 	if len(trueOrFalse) >= 1 {
 		if trueOrFalse[0] {
-			mode = cascadeAuto
+			mode = cascadeEager
 		} else {
-			mode = cascadeManually
+			mode = cascadeLazy
 		}
 	}
 
-	session.statement.cascadeMode = mode
+	session.cascadeMode = mode
 	return session
 }
 
@@ -601,10 +608,10 @@ func (session *Session) slice2Bean(scanResults []interface{}, fields []string, f
 						session.engine.logger.Error("sql.Sanner error:", err.Error())
 						hasAssigned = false
 					}
-				} else if (col.AssociateType == core.AssociateNone &&
-					session.statement.cascadeMode == cascadeCompitable) ||
+				} else if session.cascadeLevel > 0 && ((col.AssociateType == core.AssociateNone &&
+					session.cascadeMode == cascadeCompitable) ||
 					(col.AssociateType == core.AssociateBelongsTo &&
-						session.statement.cascadeMode == cascadeAuto) {
+						session.cascadeMode == cascadeEager)) {
 					var pk = make(core.PK, len(col.AssociateTable.PrimaryKeys))
 					var err error
 					rawValueType := col.AssociateTable.PKColumns()[0].FieldType
@@ -619,23 +626,12 @@ func (session *Session) slice2Bean(scanResults []interface{}, fields []string, f
 					}
 
 					pk[0] = reflect.ValueOf(pk[0]).Elem().Interface()
-					if fieldValue.Kind() == reflect.Ptr {
-						if fieldValue.IsNil() {
-							fieldValue.Set(reflect.New(fieldValue.Type()))
-						}
-						session.afterLoadClosures = append(session.afterLoadClosures, loadClosure{
-							Func:       session.getByPK,
-							pk:         pk,
-							fieldValue: fieldValue,
-						})
-					} else {
-						v := fieldValue.Addr()
-						session.afterLoadClosures = append(session.afterLoadClosures, loadClosure{
-							Func:       session.getByPK,
-							pk:         pk,
-							fieldValue: &v,
-						})
-					}
+					session.afterLoadClosures = append(session.afterLoadClosures, loadClosure{
+						Func:       session.getByPK,
+						pk:         pk,
+						fieldValue: fieldValue,
+					})
+					session.cascadeLevel--
 					hasAssigned = true
 				} else if col.AssociateType == core.AssociateBelongsTo {
 					hasAssigned = true
@@ -647,10 +643,10 @@ func (session *Session) slice2Bean(scanResults []interface{}, fields []string, f
 				}
 			case reflect.Ptr:
 				if fieldType != core.PtrTimeType && fieldType.Elem().Kind() == reflect.Struct {
-					if (col.AssociateType == core.AssociateNone &&
-						session.statement.cascadeMode == cascadeCompitable) ||
+					if session.cascadeLevel > 0 && ((col.AssociateType == core.AssociateNone &&
+						session.cascadeMode == cascadeCompitable) ||
 						(col.AssociateType == core.AssociateBelongsTo &&
-							session.statement.cascadeMode == cascadeAuto) {
+							session.cascadeMode == cascadeEager)) {
 						var pk = make(core.PK, len(col.AssociateTable.PrimaryKeys))
 						var err error
 						rawValueType := col.AssociateTable.ColumnType(col.AssociateTable.PKColumns()[0].FieldName)
@@ -665,14 +661,13 @@ func (session *Session) slice2Bean(scanResults []interface{}, fields []string, f
 						}
 
 						pk[0] = reflect.ValueOf(pk[0]).Elem().Interface()
-						fmt.Println("=====", fieldValue, fieldValue.IsNil())
-						fmt.Printf("%#v", fieldValue)
 						session.afterLoadClosures = append(session.afterLoadClosures, loadClosure{
 							Func:       session.getByPK,
 							pk:         pk,
 							fieldValue: fieldValue,
 						})
 
+						session.cascadeLevel--
 						hasAssigned = true
 					} else if col.AssociateType == core.AssociateBelongsTo {
 						hasAssigned = true
@@ -682,7 +677,6 @@ func (session *Session) slice2Bean(scanResults []interface{}, fields []string, f
 							fieldValue.Set(structInter)
 						}
 
-						//fieldValue.Elem().FieldByName(table.PKColumns()[0].FieldName).Set(vv)
 						err := convertAssign(fieldValue.Elem().FieldByName(table.PKColumns()[0].FieldName).Addr().Interface(),
 							vv.Interface())
 						if err != nil {
@@ -691,7 +685,6 @@ func (session *Session) slice2Bean(scanResults []interface{}, fields []string, f
 					}
 				} else {
 					// !nashtsai! TODO merge duplicated codes above
-					//typeStr := fieldType.String()
 					switch fieldType {
 					// following types case matching ptr's native type, therefore assign ptr directly
 					case core.PtrStringType:
@@ -839,14 +832,17 @@ func (session *Session) getByPK(pk core.PK, fieldValue *reflect.Value) error {
 			structInter = fieldValue.Addr()
 		}
 
-		has, err := session.ID(pk).NoCascade().get(structInter.Interface())
+		has, err := session.ID(pk).NoAutoCondition().get(structInter.Interface())
 		if err != nil {
 			return err
 		}
 		if has {
 			if fieldValue.Kind() == reflect.Ptr && fieldValue.IsNil() {
 				fieldValue.Set(structInter)
-				fmt.Println("333", fieldValue.IsNil())
+			} else if fieldValue.Kind() == reflect.Struct {
+				fieldValue.Set(structInter.Elem())
+			} else {
+				return errors.New("set value failed")
 			}
 		} else {
 			return errors.New("cascade obj is not exist")

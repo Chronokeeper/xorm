@@ -95,7 +95,7 @@ func (session *Session) nocacheGet(beanKind reflect.Kind, table *core.Table, bea
 		rows.Close()
 
 		dataStruct := rValue(bean)
-		_, err = session.slice2Bean(scanResults, fields, len(fields), bean, &dataStruct, session.statement.RefTable)
+		_, err = session.slice2Bean(scanResults, fields, len(fields), bean, &dataStruct, table)
 		if b, hasAfterSet := bean.(AfterSetProcessor); hasAfterSet {
 			for ii, key := range fields {
 				b.AfterSet(key, Cell(scanResults[ii].(*interface{})))
@@ -111,9 +111,12 @@ func (session *Session) nocacheGet(beanKind reflect.Kind, table *core.Table, bea
 			return true, err
 		}
 
-		for _, closure := range session.afterLoadClosures {
-			if err = closure.Func(closure.pk, closure.fieldValue); err != nil {
-				return true, err
+		for i := 0; i < len(session.afterLoadClosures); i++ {
+			if !session.afterLoadClosures[i].loaded {
+				session.afterLoadClosures[i].loaded = true
+				if err = session.afterLoadClosures[i].Func(session.afterLoadClosures[i].pk, session.afterLoadClosures[i].fieldValue); err != nil {
+					return false, err
+				}
 			}
 		}
 	case reflect.Slice:

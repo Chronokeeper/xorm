@@ -243,9 +243,15 @@ func (session *Session) noCacheFind(table *core.Table, containerValue reflect.Va
 		if err != nil {
 			return err
 		}
-		for _, closure := range session.afterLoadClosures {
-			if err = closure.Func(closure.pk, closure.fieldValue); err != nil {
-				return err
+
+		// TODO: use IN group same table query
+		fmt.Println("loading....", len(session.afterLoadClosures))
+		for i := 0; i < len(session.afterLoadClosures); i++ {
+			if !session.afterLoadClosures[i].loaded {
+				session.afterLoadClosures[i].loaded = true
+				if err = session.afterLoadClosures[i].Func(session.afterLoadClosures[i].pk, session.afterLoadClosures[i].fieldValue); err != nil {
+					return err
+				}
 			}
 		}
 		return nil
